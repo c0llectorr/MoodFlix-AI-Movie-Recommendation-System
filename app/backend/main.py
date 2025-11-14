@@ -374,9 +374,16 @@ app = FastAPI(
 )
 
 # CORS middleware
+FRONTEND_URL = 'https://moodflix-ai-nu.vercel.app'
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure appropriately for production
+    allow_origins=[
+        "http://localhost:3000",  # Local development
+        "http://localhost:8000",  # Local backend
+        FRONTEND_URL,  # Production frontend
+        "https://*.vercel.app",  # All Vercel preview deployments
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
