@@ -13,7 +13,7 @@ const EmotionDetector = () => {
   const textareaRef = useRef(null);
 
   // API endpoint - change this to your deployed backend URL
-  const API_URL = 'http://localhost:8000';
+  const API_URL = 'https://mahmdshafee-emotion-detection-api.hf.space';
 
   // Emotion configurations with colors and icons
   const emotionConfig = {
