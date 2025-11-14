@@ -305,14 +305,14 @@ class ModelManager:
             probs = torch.softmax(logits, dim=-1)
             confidence, predicted_class = torch.max(probs, dim=-1)
             
-            # Convert to CPU and numpy
-            probs_np = probs.cpu().float().numpy()[0]
+            # Convert to CPU and Python list (no numpy needed)
+            probs_list = probs.cpu().float().tolist()[0]
             predicted_idx = predicted_class.item()
             confidence_score = confidence.item()
             
             # Create emotion probability dict
             emotion_probs = {
-                emotion: float(probs_np[i]) 
+                emotion: float(probs_list[i]) 
                 for i, emotion in enumerate(config.EMOTION_CLASSES)
             }
             
