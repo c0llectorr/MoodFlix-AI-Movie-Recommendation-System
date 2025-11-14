@@ -1,0 +1,24 @@
+{
+    "pt-models": {
+        "type": "tag",
+        "filepath": "models",
+        "flags": null,
+        "wrapper": null,
+        "presets": null,
+        "ssh": null,
+        "tag": "*.pt",
+        "occurences": ":",
+        "end": ""
+    },
+    "safetensors-models": {
+        "type": "tag",
+        "filepath": "models",
+        "flags": null,
+        "wrapper": null,
+        "presets": null,
+        "ssh": null,
+        "tag": "*.safetensors",
+        "occurences": ":",
+        "end": ""
+    }
+}
