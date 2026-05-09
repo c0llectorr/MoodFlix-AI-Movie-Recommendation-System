@@ -6,6 +6,7 @@ Optimized for 710MB model with efficient tokenization and inference
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel, Field, field_validator
 from contextlib import asynccontextmanager
 import torch
@@ -35,13 +36,13 @@ logger = logging.getLogger(__name__)
 
 # ==================== ENVIRONMENT SETUP ====================
 load_dotenv()  # Load from .env file
-TMDB_API_KEY = os.getenv('TMDB_API_KEY', '')
+TMDB_API_KEY = os.getenv('TMDB_API_KEY', '').strip().strip('"').strip("'")
 TMDB_BASE_URL = "https://api.themoviedb.org/3"
 TMDB_IMAGE_BASE_URL = "https://image.tmdb.org/t/p/w500"
 
 # ==================== CONFIGURATION ====================
 class Config:
-    MODEL_PATH = "./../../models/"  # Path to your saved model
+    MODEL_PATH = "/app/models/"  # Absolute path for Docker compatibility
     MAX_LENGTH = 128
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     BATCH_SIZE = 8  # For batch predictions
@@ -49,15 +50,16 @@ class Config:
     
     EMOTION_CLASSES = ['anger', 'fear', 'joy', 'love', 'neutral', 'sadness', 'surprise']
     
-    # Emotion to Genre Mapping (4 genres per emotion)
+    # Emotion to Genre Mapping (using TMDB standard genres)
+    # TMDB genres: Action, Adventure, Animation, Comedy, Crime, Documentary, Drama, Family, Fantasy, History, Horror, Music, Mystery, Romance, Science Fiction, TV Movie, Thriller, War, Western
     EMOTION_GENRE_MAP = {
-        'anger': ['Action', 'Crime', 'Thriller', 'Revenge-Drama'],
-        'fear': ['Horror', 'Thriller', 'Mystery', 'Supernatural'],
-        'joy': ['Comedy', 'Adventure', 'Family', 'Animation', 'Musical'],
-        'love': ['Romance', 'Rom-Com', 'Emotional Drama', 'Fantasy'],
-        'neutral': ['Documentary', 'Drama', 'Biography', 'Slice-of-Life'],
-        'sadness': ['Drama', 'Romance', 'Indie', 'Healing-Stories'],
-        'surprise': ['Mystery', 'Sci-Fi', 'Fantasy', 'Twist-Thriller']
+        'anger': ['Action', 'Crime', 'Thriller', 'War'],
+        'fear': ['Horror', 'Thriller', 'Mystery', 'Science Fiction'],
+        'joy': ['Comedy', 'Adventure', 'Family', 'Animation'],
+        'love': ['Romance', 'Drama', 'Fantasy', 'Music'],
+        'neutral': ['Documentary', 'Drama', 'History', 'Biography'],
+        'sadness': ['Drama', 'Romance', 'History', 'War'],
+        'surprise': ['Mystery', 'Science Fiction', 'Fantasy', 'Thriller']
     }
     
     # Performance settings
@@ -351,12 +353,18 @@ async def lifespan(app: FastAPI):
     """Manage application lifecycle"""
     # Startup
     logger.info("Starting application...")
+    app.state.model_ready = False
+    app.state.startup_error = None
+    
     try:
         model_manager.load_model()
-        logger.info("Application ready")
+        app.state.model_ready = True
+        logger.info("Application ready - Model loaded successfully")
     except Exception as e:
-        logger.error(f"Startup failed: {e}")
-        raise
+        logger.error(f"Startup failed: {e}", exc_info=True)
+        app.state.startup_error = str(e)
+        app.state.model_ready = False
+        # Don't raise - allow app to start but return 503 until model is ready
     
     yield
     
@@ -388,6 +396,31 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ==================== MIDDLEWARE ====================
+class ModelReadinessMiddleware(BaseHTTPMiddleware):
+    """Check if model is ready before processing requests"""
+    async def dispatch(self, request: Request, call_next):
+        # Allow health check and root endpoints without model
+        if request.url.path in ["/health", "/", "/docs", "/openapi.json", "/emotions"]:
+            return await call_next(request)
+        
+        # Check model readiness for other endpoints
+        model_ready = getattr(request.app.state, 'model_ready', False)
+        if not model_ready:
+            startup_error = getattr(request.app.state, 'startup_error', 'Model loading in progress')
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "error": "Service Unavailable",
+                    "detail": f"Model is initializing: {startup_error}",
+                    "status": "initializing"
+                }
+            )
+        
+        return await call_next(request)
+
+app.add_middleware(ModelReadinessMiddleware)
 
 # ==================== REQUEST/RESPONSE MODELS ====================
 class PredictionRequest(BaseModel):
@@ -459,16 +492,28 @@ async def root():
     }
 
 @app.get("/health", response_model=HealthResponse)
-async def health_check():
+async def health_check(request: Request):
     """Health check endpoint"""
     try:
         memory_mb = psutil.Process().memory_info().rss / 1024 ** 2
+        model_loaded = getattr(request.app.state, 'model_ready', False)
+        
+        if not model_loaded:
+            startup_error = getattr(request.app.state, 'startup_error', 'Model loading in progress')
+            logger.warning(f"Health check: Model not ready - {startup_error}")
+            raise HTTPException(
+                status_code=503, 
+                detail=f"Service initializing: {startup_error}"
+            )
+        
         return HealthResponse(
             status="healthy",
             device=config.DEVICE,
-            model_loaded=model_manager.model is not None,
+            model_loaded=model_loaded,
             memory_mb=round(memory_mb, 2)
         )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Health check failed: {e}")
         raise HTTPException(status_code=500, detail="Health check failed")
@@ -597,9 +642,12 @@ async def fetch_movies_by_genres(genres: List[str], limit: int = 12) -> Dict[str
         logger.error("TMDB_API_KEY not configured")
         raise HTTPException(status_code=500, detail="Movie service not configured. Please set TMDB_API_KEY environment variable.")
     
+    logger.info(f"Starting movie fetch for genres: {genres}")
+    logger.info(f"TMDB API Key configured: {bool(TMDB_API_KEY)}")
+    
     movies_by_genre = {}
     
-    async with httpx.AsyncClient(timeout=10.0) as client:
+    async with httpx.AsyncClient(timeout=15.0) as client:
         for genre in genres:
             try:
                 logger.info(f"Fetching movies for genre: {genre}")
@@ -612,6 +660,8 @@ async def fetch_movies_by_genres(genres: List[str], limit: int = 12) -> Dict[str
                 genres_response.raise_for_status()
                 genres_data = genres_response.json()
                 
+                logger.debug(f"TMDB genres response: {genres_data}")
+                
                 genre_id = None
                 for g in genres_data.get("genres", []):
                     if g["name"].lower() == genre.lower():
@@ -619,8 +669,10 @@ async def fetch_movies_by_genres(genres: List[str], limit: int = 12) -> Dict[str
                         break
                 
                 if not genre_id:
-                    logger.warning(f"Genre '{genre}' not found in TMDB")
+                    logger.warning(f"Genre '{genre}' not found in TMDB. Available genres: {[g['name'] for g in genres_data.get('genres', [])]}")
                     continue
+                
+                logger.info(f"Found genre '{genre}' with ID: {genre_id}")
                 
                 # Fetch movies for this genre, sorted by popularity (descending)
                 movies_response = await client.get(
@@ -636,6 +688,8 @@ async def fetch_movies_by_genres(genres: List[str], limit: int = 12) -> Dict[str
                 movies_response.raise_for_status()
                 movies_data = movies_response.json()
                 
+                logger.debug(f"Movies response for {genre}: {len(movies_data.get('results', []))} results")
+                
                 # Parse movies
                 movie_list = []
                 for movie in movies_data.get("results", [])[:limit]:
@@ -649,15 +703,18 @@ async def fetch_movies_by_genres(genres: List[str], limit: int = 12) -> Dict[str
                 
                 if movie_list:
                     movies_by_genre[genre] = movie_list
-                    logger.info(f"Fetched {len(movie_list)} movies for genre: {genre}")
+                    logger.info(f"Successfully fetched {len(movie_list)} movies for genre: {genre}")
                 else:
                     logger.warning(f"No movies found for genre: {genre}")
                     
+            except httpx.HTTPStatusError as e:
+                logger.error(f"HTTP {e.response.status_code} error fetching movies for {genre}: {e.response.text}")
             except httpx.HTTPError as e:
                 logger.error(f"HTTP error fetching movies for {genre}: {e}")
             except Exception as e:
                 logger.error(f"Error fetching movies for {genre}: {e}", exc_info=True)
     
+    logger.info(f"Movie fetch complete. Genres with results: {list(movies_by_genre.keys())}")
     return movies_by_genre
 
 # ==================== MAIN ====================

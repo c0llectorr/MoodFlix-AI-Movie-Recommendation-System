@@ -12,8 +12,8 @@ const EmotionDetector = () => {
   const [isDark, setIsDark] = useState(true);
   const textareaRef = useRef(null);
 
-  // API endpoint - change this to your deployed backend URL
-  const API_URL = 'https://mahmdshafee-emotion-detection-api.hf.space';
+  // API endpoint - use environment variable or default to localhost
+  const API_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
 
   // Emotion configurations with colors and icons
   const emotionConfig = {
